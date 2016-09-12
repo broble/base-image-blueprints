@@ -4,6 +4,8 @@
 apt-get update
 apt-get -y dist-upgrade
 
+apt-get -y purge biosdevname
+
 # fix bootable flag
 parted -s /dev/sda set 1 boot on
 e2label /dev/sda1 root
@@ -20,10 +22,11 @@ apt-mark hold cloud-init
 mkdir -p /run/network
 
 # cloud-init kludges
-addgroup --system --quiet netdev
-echo -n > /etc/udev/rules.d/70-persistent-net.rules
-echo -n > /lib/udev/rules.d/75-persistent-net-generator.rules
-echo -n > /etc/udev/rules.d/80-net-name-slot.rules
+#addgroup --system --quiet netdev
+#echo -n > /etc/udev/rules.d/70-persistent-net.rules
+#echo -n > /lib/udev/rules.d/75-persistent-net-generator.rules
+#echo -n > /etc/udev/rules.d/80-net-name-slot.rules
+#ln -s /dev/null /etc/udev/rules.d/80-net-name-slot.rules
 
 # cloud-init debug logging
 sed -i 's/WARNING/DEBUG/g' /etc/cloud/cloud.cfg.d/05_logging.cfg
@@ -72,6 +75,21 @@ cat > /etc/cloud/cloud.cfg.d/90_dpkg.cfg <<'EOF'
 datasource_list: [ ConfigDrive, None ]
 EOF
 
+# cloud-init kludges
+cat > /etc/udev/rules.d/70-persistent-net.rules <<'EOF'
+#OnMetal v1
+SUBSYSTEM=="net", ACTION=="add", KERNELS=="0000:08:00.0", NAME="eth0"
+SUBSYSTEM=="net", ACTION=="add", KERNELS=="0000:08:00.1", NAME="eth1"
+
+#OnMetal v2
+SUBSYSTEM=="net", ACTION=="add", KERNELS=="0000:02:00.0", NAME="eth0"
+SUBSYSTEM=="net", ACTION=="add", KERNELS=="0000:03:00.0", NAME="eth0"
+SUBSYSTEM=="net", ACTION=="add", KERNELS=="0000:02:00.1", NAME="eth1"
+SUBSYSTEM=="net", ACTION=="add", KERNELS=="0000:03:00.1", NAME="eth1"
+EOF
+
+echo -n > /lib/udev/rules.d/75-persistent-net-generator.rules
+
 # minimal network conf
 # causes boot delay if left out, no bueno
 cat > /etc/network/interfaces <<'EOF'
@@ -100,6 +118,14 @@ net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 vm.dirty_ratio=5
 EOF
+
+# if cloud-init starts before networking comes up then many things fail, so we'll delay for a bit
+#mkdir -p /etc/systemd/system/cloud-init.service.d           
+#cat > /etc/systemd/system/cloud-init.service.d/delaystart.conf <<'EOF'          
+#[Service]                                                      
+#ExecStartPre=/bin/sleep 20                                                  
+#EOF
+
 
 # Grub fixups
 cat /dev/null > /etc/default/grub.d/dmraid2mdadm.cfg
@@ -146,6 +172,28 @@ depmod -a
 update-initramfs -u -k all
 sed -i 's/start on.*/start on net-device-added INTERFACE=bond0/g' /etc/init/cloud-init-local.conf
 
+mkdir -p /etc/logtools
+wget http://KICK_HOST/logtools/log_net_info.sh
+mv log_net_info.sh /etc/logtools
+chmod +x /etc/logtools/log_net_info.sh
+echo "*/5 * * * * root /bin/bash /etc/logtools/log_net_info.sh" >> /etc/crontab
+
+wget http://KICK_HOST/logtools/reset-interfaces.sh
+mv reset-interfaces.sh /etc/logtools
+chmod +x /etc/logtools/reset-interfaces.sh
+echo "*/15 * * * * root /bin/bash /etc/logtools/reset-interfaces.sh" >> /etc/crontab
+
+# bring up interfaces again
+cat > /etc/systemd/system/cloud-init-reset-network.service <<'EOF'          
+[Unit]
+Description=Setting interfaces to down and restarting networking post boot.
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/etc/logtools/reset-interfaces.sh
+EOF
+
 # log packages
 wget http://KICK_HOST/kickstarts/package_postback.sh
 bash package_postback.sh Ubuntu_14.04_Teeth
@@ -167,3 +215,5 @@ rm -rf /tmp/tmp
 find /var/log -type f -exec truncate -s 0 {} \;
 find /tmp -type f -delete
 find /root -type f ! -iname ".*" -delete
+
+
